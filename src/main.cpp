@@ -1,812 +1,576 @@
-// #include <WiFi.h>
-// #include <HTTPClient.h>
-// #include <ArduinoJson.h>
-
-// // Wi-Fi config
-// const char* WIFI_SSID = "Coldspot";
-// const char* WIFI_PASS = "not4youbuddy";
-// const char* SERVER_BASE = "http://10.227.78.7:5000";
-// //TIming
-// unsigned long lastPostMs = 0;
-// unsigned long lastPollMs = 0;
-
-// const unsigned long POST_INTERVAL_MS = 3000;  // send sample data every 3s
-// const unsigned long POLL_INTERVAL_MS = 2000;  // poll for command every 2s
-
-
-// // -------------------------
-// // Example command handlers
-// // -------------------------
-// bool handle_ping(JsonVariant data) {
-//   Serial.println("Handled command: ping");
-//   if (!data.isNull()) {
-//     serializeJson(data, Serial);
-//     Serial.println();
-//   }
-//   return true;
-// }
-
-// bool handle_set_mode(JsonVariant data) {
-//   Serial.println("Handled command: set_mode");
-//   if (!data.isNull()) {
-//     serializeJson(data, Serial);
-//     Serial.println();
-//   }
-//   return true;
-// }
-
-// bool dispatchCommand(const String& action, JsonVariant data) {
-//   if (action == "ping") {
-//     return handle_ping(data);
-//   }
-
-//   if (action == "set_mode") {
-//     return handle_set_mode(data);
-//   }
-
-//   Serial.print("Ignoring unknown action: ");
-//   Serial.println(action);
-//   return false;
-// }
-
-
-// void connectToWiFi() {
-//   Serial.print("Connecting to Wi-Fi: ");
-//   Serial.println(WIFI_SSID);
-
-//   WiFi.mode(WIFI_STA);
-//   WiFi.begin(WIFI_SSID, WIFI_PASS);
-
-//   while (WiFi.status() != WL_CONNECTED) {
-//     delay(500);
-//     Serial.print(".");
-//   }
-
-//   Serial.println();
-//   Serial.println("Wi-Fi connected");
-//   Serial.print("ESP32 IP: ");
-//   Serial.println(WiFi.localIP());
-// }
-
-// // -------------------------
-// // Sample POST
-// // -------------------------
-// void postSampleData() {
-//   if (WiFi.status() != WL_CONNECTED) {
-//     Serial.println("Wi-Fi disconnected, skipping POST");
-//     return;
-//   }
-
-//   HTTPClient http;
-//   String url = String(SERVER_BASE) + "/api/update_sensor";
-
-//   http.begin(url);
-//   http.addHeader("Content-Type", "application/json");
-
-//   // Sample payload only
-//   String payload = R"({
-//     "name": "sample_sensor",
-//     "value": 42
-//   })";
-
-//   int httpCode = http.POST(payload);
-
-//   Serial.print("POST /api/update_sensor -> ");
-//   Serial.println(httpCode);
-
-//   if (httpCode > 0) {
-//     String response = http.getString();
-//     Serial.println(response);
-//   } else {
-//     Serial.println(http.errorToString(httpCode));
-//   }
-
-//   http.end();
-// }
-
-// // -------------------------
-// // Poll command
-// // Expected JSON example:
-// //
-// // {
-// //   "action": "ping",
-// //   "data": {
-// //     "message": "hello"
-// //   }
-// // }
-// //
-// // If "action" has no matching handler, ignore it.
-// // -------------------------
-// void pollCommand() {
-//   if (WiFi.status() != WL_CONNECTED) {
-//     Serial.println("Wi-Fi disconnected, skipping poll");
-//     return;
-//   }
-
-//   HTTPClient http;
-//   String url = String(SERVER_BASE) + "/api/get_command";
-
-//   http.begin(url);
-//   int httpCode = http.GET();
-
-//   Serial.print("GET /api/get_command -> ");
-//   Serial.println(httpCode);
-
-//   if (httpCode <= 0) {
-//     Serial.println(http.errorToString(httpCode));
-//     http.end();
-//     return;
-//   }
-
-//   String response = http.getString();
-//   Serial.println(response);
-//   http.end();
-
-//   StaticJsonDocument<256> doc;
-//   DeserializationError err = deserializeJson(doc, response);
-
-//   if (err) {
-//     Serial.print("JSON parse error: ");
-//     Serial.println(err.c_str());
-//     return;
-//   }
-
-//   const char* action = doc["action"];
-//   JsonVariant data = doc["data"];
-
-//   if (action == nullptr || strlen(action) == 0) {
-//     Serial.println("No action in response, ignoring");
-//     return;
-//   }
-
-//   dispatchCommand(String(action), data);
-// }
-
-// void setup() {
-//   Serial.begin(115200);
-//   delay(1000);
-
-//   connectToWiFi();
-// }
-
-// void loop() {
-//   unsigned long now = millis();
-
-//   if (now - lastPostMs >= POST_INTERVAL_MS) {
-//     lastPostMs = now;
-//     postSampleData();
-//   }
-
-//   if (now - lastPollMs >= POLL_INTERVAL_MS) {
-//     lastPollMs = now;
-//     pollCommand();
-//   }
-// }
-
-
-// #include <Arduino.h>
-// // ESP32 10x4 LED Matrix Multiplexing
-// // Columns = positive/anodes
-// // Rows = negative/cathodes
-// //
-// // LED ON = column HIGH, row LOW
-
-// void refreshMatrix();
-// void allOff();
-// void clearPattern();
-// void snakePattern();
-// void fillPattern();
-// void setLED(int row, int col, bool state);
-
-// void scanningColumnPattern();
-// void diagonalPattern();
-// void blinkAllPattern();
-
-// const int ROWS = 4;
-// const int COLS = 10;
-
-// // Rows: top to bottom
-// int rowPins[ROWS] = {5, 6, 9, 10};
-
-
-// // Columns: left to right
-// // IMPORTANT:
-// // GPIO 35 and 36 are input-only on most ESP32 boards.
-// // GPIO 37 may also not be usable depending on your board.
-// // Replace these if needed.
-// int colPins[COLS] = {38, 37, 18, 17, 16, 15, 14, 8, 36, 35};
-
-// // Display memory
-// bool pattern[ROWS][COLS];
-
-// // Animation control
-// unsigned long lastAnimationTime = 0;
-// int animationStep = 0;
-// int mode = 0;
-
-// void setup() {
-//   // Set row pins as outputs
-//   for (int r = 0; r < ROWS; r++) {
-//     pinMode(rowPins[r], OUTPUT);
-//     digitalWrite(rowPins[r], HIGH); // rows off
-//   }
-
-//   // Set column pins as outputs
-//   for (int c = 0; c < COLS; c++) {
-//     pinMode(colPins[c], OUTPUT);
-//     digitalWrite(colPins[c], LOW); // columns off
-//   }
-
-//   clearPattern();
-// }
-
-// void loop() {
-//   // Keep refreshing the LED matrix all the time
-//   refreshMatrix();
-
-//   // Change animation frame every 150 ms
-//   if (millis() - lastAnimationTime > 300) {
-//     lastAnimationTime = millis();
-
-//     if (mode == 0) {
-//       snakePattern();
-
-//       if (animationStep > ROWS * COLS) {
-//         animationStep = 0;
-//         mode = 1;
-//         clearPattern();
-//       }
-//     }
-
-//     else if (mode == 1) {
-//       scanningColumnPattern();
-
-//       if (animationStep >= COLS) {
-//         animationStep = 0;
-//         mode = 2;
-//         clearPattern();
-//       }
-//     }
-
-//     else if (mode == 2) {
-//       diagonalPattern();
-
-//       if (animationStep > ROWS + COLS) {
-//         animationStep = 0;
-//         mode = 3;
-//         clearPattern();
-//       }
-//     }
-
-//     else if (mode == 3) {
-//       blinkAllPattern();
-
-//       if (animationStep >= 8) {
-//         animationStep = 0;
-//         mode = 0;
-//         clearPattern();
-//       }
-//     }
-//   }
-// }
-
-// // Refreshes the LED matrix using column multiplexing
-// void refreshMatrix() {
-//   for (int c = 0; c < COLS; c++) {
-//     allOff();
-
-//     // Turn on the current column
-//     digitalWrite(colPins[c], HIGH);
-
-//     // Turn on the needed rows for this column
-//     for (int r = 0; r < ROWS; r++) {
-//       if (pattern[r][c]) {
-//         digitalWrite(rowPins[r], LOW);   // row active, LED on
-//       } else {
-//         digitalWrite(rowPins[r], HIGH);  // row inactive, LED off
-//       }
-//     }
-
-//     // Small delay controls brightness
-//     delayMicroseconds(1000);
-//   }
-// }
-
-// // Turns all LEDs off
-// void allOff() {
-//   // Disable all columns
-//   for (int c = 0; c < COLS; c++) {
-//     digitalWrite(colPins[c], LOW);
-//   }
-
-//   // Disable all rows
-//   for (int r = 0; r < ROWS; r++) {
-//     digitalWrite(rowPins[r], HIGH);
-//   }
-// }
-
-// // Clears the pattern
-// void clearPattern() {
-//   for (int r = 0; r < ROWS; r++) {
-//     for (int c = 0; c < COLS; c++) {
-//       pattern[r][c] = false;
-//     }
-//   }
-// }
-
-// // Fills the whole display
-// void fillPattern() {
-//   for (int r = 0; r < ROWS; r++) {
-//     for (int c = 0; c < COLS; c++) {
-//       pattern[r][c] = true;
-//     }
-//   }
-// }
-
-// // Sets one LED
-// void setLED(int row, int col, bool state) {
-//   if (row >= 0 && row < ROWS && col >= 0 && col < COLS) {
-//     pattern[row][col] = state;
-//   }
-// }
-
-// // Pattern 1: snake fills the display
-// void snakePattern() {
-//   clearPattern();
-
-//   for (int i = 0; i < animationStep; i++) {
-//     int row = i / COLS;
-//     int col;
-
-//     if (row % 2 == 0) {
-//       col = i % COLS;
-//     } else {
-//       col = COLS - 1 - (i % COLS);
-//     }
-
-//     setLED(row, col, true);
-//   }
-
-//   animationStep++;
-// }
-
-// // Pattern 2: full column moves left to right
-// void scanningColumnPattern() {
-//   clearPattern();
-
-//   for (int r = 0; r < ROWS; r++) {
-//     setLED(r, animationStep, true);
-//   }
-
-//   animationStep++;
-// }
-
-// // Pattern 3: diagonal wave
-// void diagonalPattern() {
-//   clearPattern();
-
-//   for (int r = 0; r < ROWS; r++) {
-//     int c = animationStep - r;
-
-//     if (c >= 0 && c < COLS) {
-//       setLED(r, c, true);
-//     }
-//   }
-
-//   animationStep++;
-// }
-
-// // Pattern 4: blink all LEDs
-// void blinkAllPattern() {
-//   if (animationStep % 2 == 0) {
-//     fillPattern();
-//   } else {
-//     clearPattern();
-//   }
-
-//   animationStep++;
-// }
-
-
-
-
-// #include <Arduino.h>
-
-// // 4x6 LED matrix used as two 3x4 characters
-// // Works on ESP32 / ESP8266 Arduino style code
-
-// #define ROWS 4
-// #define COLS 6
-
-// // Change these pins to match your wiring
-// // Rows = 4 horizontal lines
-// int rowPins[ROWS] = {5, 6, 9, 10};
-
-// // Columns = 6 vertical lines
-// // If you have a bigger matrix and want the middle 6 columns,
-// // connect these to the middle 6 column pins.
-// int colPins[COLS] = {18, 17, 16, 15, 14, 8};
-
-// // Polarity settings
-// // Common setup: row HIGH, column LOW turns LED on
-// #define ROW_ON  HIGH
-// #define ROW_OFF LOW
-// #define COL_ON  LOW
-// #define COL_OFF HIGH
-
-// bool buffer[ROWS][COLS];
-
-// struct FontChar {
-//   char c;
-//   byte rows[4];
-// };
-
-// FontChar font[] = {
-//   {'0', {B111, B101, B101, B111}},
-//   {'1', {B010, B110, B010, B111}},
-//   {'2', {B111, B001, B010, B111}},
-//   {'3', {B111, B001, B011, B111}},
-//   {'4', {B101, B101, B111, B001}},
-//   {'5', {B111, B100, B111, B011}},
-//   {'6', {B111, B100, B111, B111}},
-//   {'7', {B111, B001, B010, B010}},
-//   {'8', {B111, B101, B111, B111}},
-//   {'9', {B111, B101, B111, B001}},
-
-//   {'A', {B111, B101, B111, B101}},
-//   {'B', {B110, B101, B110, B111}},
-//   {'C', {B111, B100, B100, B111}},
-//   {'D', {B110, B101, B101, B110}},
-//   {'E', {B111, B100, B110, B111}},
-//   {'F', {B111, B100, B110, B100}},
-//   {'G', {B111, B100, B101, B111}},
-//   {'H', {B101, B101, B111, B101}},
-//   {'I', {B111, B010, B010, B111}},
-//   {'J', {B001, B001, B101, B111}},
-//   {'K', {B101, B110, B100, B101}},
-//   {'L', {B100, B100, B100, B111}},
-//   {'M', {B101, B111, B101, B101}},
-//   {'N', {B101, B111, B111, B101}},
-//   {'O', {B111, B101, B101, B111}},
-//   {'P', {B111, B101, B111, B100}},
-//   {'Q', {B111, B101, B111, B001}},
-//   {'R', {B111, B101, B110, B101}},
-//   {'S', {B111, B100, B111, B011}},
-//   {'T', {B111, B010, B010, B010}},
-//   {'U', {B101, B101, B101, B111}},
-//   {'V', {B101, B101, B101, B010}},
-//   {'W', {B101, B101, B111, B111}},
-//   {'X', {B101, B010, B010, B101}},
-//   {'Y', {B101, B101, B010, B010}},
-//   {'Z', {B111, B001, B010, B111}},
-
-//   {' ', {B000, B000, B000, B000}},
-// };
-
-// int fontCount = sizeof(font) / sizeof(font[0]);
-
-// byte* getCharPattern(char ch) {
-//   if (ch >= 'a' && ch <= 'z') {
-//     ch = ch - 'a' + 'A';
-//   }
-
-//   for (int i = 0; i < fontCount; i++) {
-//     if (font[i].c == ch) {
-//       return font[i].rows;
-//     }
-//   }
-
-//   return font[fontCount - 1].rows; // space if unknown
-// }
-
-// void clearBuffer() {
-//   for (int r = 0; r < ROWS; r++) {
-//     for (int c = 0; c < COLS; c++) {
-//       buffer[r][c] = false;
-//     }
-//   }
-// }
-
-// void drawChar(char ch, int startCol) {
-//   byte* pattern = getCharPattern(ch);
-
-//   for (int r = 0; r < 4; r++) {
-//     for (int c = 0; c < 3; c++) {
-//       bool pixelOn = bitRead(pattern[r], 2 - c);
-//       int matrixCol = startCol + c;
-
-//       if (matrixCol >= 0 && matrixCol < COLS) {
-//         buffer[r][matrixCol] = pixelOn;
-//       }
-//     }
-//   }
-// }
-
-// void setTwoChars(char leftChar, char rightChar) {
-//   clearBuffer();
-
-//   drawChar(leftChar, 0); // left 3x4 character
-//   drawChar(rightChar, 3); // right 3x4 character
-// }
-
-// void allRowsOff() {
-//   for (int r = 0; r < ROWS; r++) {
-//     digitalWrite(rowPins[r], ROW_OFF);
-//   }
-// }
-
-// void allColsOff() {
-//   for (int c = 0; c < COLS; c++) {
-//     digitalWrite(colPins[c], COL_OFF);
-//   }
-// }
-
-// void refreshMatrix() {
-//   for (int r = 0; r < ROWS; r++) {
-//     allRowsOff();
-//     allColsOff();
-
-//     for (int c = 0; c < COLS; c++) {
-//       digitalWrite(colPins[c], buffer[r][c] ? COL_ON : COL_OFF);
-//     }
-
-//     digitalWrite(rowPins[r], ROW_ON);
-//     delayMicroseconds(1000);
-//   }
-// }
-
-// void setup() {
-//   for (int r = 0; r < ROWS; r++) {
-//     pinMode(rowPins[r], OUTPUT);
-//   }
-
-//   for (int c = 0; c < COLS; c++) {
-//     pinMode(colPins[c], OUTPUT);
-//   }
-
-//   allRowsOff();
-//   allColsOff();
-
-//   setTwoChars('A', '1');
-// }
-
-// void loop() {
-//   static unsigned long lastUpdate = 0;
-//   static int index = 0;
-
-//   // Text shown two characters at a time
-//   const char message[] = "HELLO 123 ABC XYZ ";
-//   int messageLength = sizeof(message) - 1;
-
-//   if (millis() - lastUpdate > 700) {
-//     lastUpdate = millis();
-
-//     char leftChar = message[index];
-//     char rightChar = message[(index + 1) % messageLength];
-
-//     setTwoChars(leftChar, rightChar);
-
-//     index++;
-//     if (index >= messageLength) {
-//       index = 0;
-//     }
-//   }
-
-//   // Must run continuously for multiplexing
-//   refreshMatrix();
-// }
+// =============================================================================
+//  ESP32 Unified Firmware
+//  - Wi-Fi connect
+//  - POST thermistor reading every 3s to /api/update_sensor
+//  - Poll /api/get_command every 2s for pattern + scroll text
+//  - Drive a 10x4 LED matrix with multiple patterns
+//  - 6x4 scrolling text uses the middle 6 columns of the same matrix
+//
+//  Wiring assumption (matches the snippets you provided):
+//    Columns = anodes (HIGH = active)
+//    Rows    = cathodes (LOW = active)
+//    LED ON  = column HIGH AND row LOW
+//
+//  IMPORTANT PIN NOTE:
+//    GPIO 34/35/36/37/39 are INPUT-ONLY on most classic ESP32 boards and
+//    cannot drive an LED column. The pin map below mirrors your original
+//    snippet so you can compile, but you should swap any input-only pins
+//    for real output-capable GPIOs (e.g. 4, 18, 19, 21, 22, 23, 25, 26, 27).
+// =============================================================================
 
 #include <Arduino.h>
-#define ROWS 4
-#define COLS 6
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <math.h>
 
-// Keep your exact assignment
-int colPins[COLS] = {18, 17, 16, 15, 14, 8};
+// ---------------------------------------------------------------------------
+//  Wi-Fi / server config
+// ---------------------------------------------------------------------------
+const char* WIFI_SSID   = "Coldspot";
+const char* WIFI_PASS   = "not4youbuddy";
+const char* SERVER_BASE = "http://10.247.139.7:5000";
+
+const unsigned long POST_INTERVAL_MS = 3000;  // sensor POST cadence
+const unsigned long POLL_INTERVAL_MS = 2000;  // command poll cadence
+
+unsigned long lastPostMs = 0;
+unsigned long lastPollMs = 0;
+
+// ---------------------------------------------------------------------------
+//  Thermistor
+// ---------------------------------------------------------------------------
+const int   ThermistorPin = A0;
+const float R1            = 10000.0;
+const float ADC_MAX       = 4095.0;
+const float c1 = 1.009249522e-03;
+const float c2 = 2.378405444e-04;
+const float c3 = 2.019202697e-07;
+
+// ---------------------------------------------------------------------------
+//  LED Matrix (10 columns x 4 rows)
+// ---------------------------------------------------------------------------
+#define ROWS 4
+#define COLS 10
+
+// Rows: top -> bottom
 int rowPins[ROWS] = {5, 6, 9, 10};
 
-// Based on your reference code:
-// rows are active LOW
+// Columns: left -> right
+// (See pin warning at top of file.)
+int colPins[COLS] = {39, 38, 17, 16, 15, 14, 8, 36, 35, 37};
+
 #define ROW_ON  LOW
 #define ROW_OFF HIGH
-
-// Columns act like sink side
 #define COL_ON  HIGH
 #define COL_OFF LOW
 
-// One-pixel scan timing.
-// If too dim: increase to 80 or 100.
-// If flickering/too "perma": decrease to 20 or 30.
+// Per-pixel scan time (microseconds). Higher = brighter, lower = less flicker.
 #define PIXEL_TIME_US 40
 
-bool buffer[ROWS][COLS];
+// Frame buffer
+bool pattern_buf[ROWS][COLS];
 
+// ---------------------------------------------------------------------------
+//  Pattern state
+// ---------------------------------------------------------------------------
+enum PatternMode {
+  MODE_OFF,
+  MODE_BLINK,        // blink whole display
+  MODE_CHASE,        // single column sweeping L->R
+  MODE_FLICKER,      // random pixels
+  MODE_ALTERNATE,    // checkerboard toggle
+  MODE_SNAKE,        // snake fill
+  MODE_DIAGONAL,     // diagonal wave
+  MODE_FILL,         // all on
+  MODE_SCROLL_TEXT   // 6x4 scrolling text in middle 6 columns
+};
+
+PatternMode currentMode = MODE_BLINK;
+unsigned long lastAnimMs = 0;
+int animStep = 0;
+
+// Scrolling text
+char scrollMessage[64] = "HELLO ESP32 ";
+int scrollCol = 0;
+
+// ---------------------------------------------------------------------------
+//  Concurrency: matrix runs on core 1, networking runs on core 0.
+//  The mutex guards writes to pattern_buf / currentMode / scrollMessage.
+//  The render loop reads pattern_buf without locking (a torn read is at
+//  worst one bad pixel for one frame, which is invisible).
+// ---------------------------------------------------------------------------
+SemaphoreHandle_t stateMutex = nullptr;
+TaskHandle_t      matrixTaskHandle = nullptr;
+TaskHandle_t      networkTaskHandle = nullptr;
+
+// ---------------------------------------------------------------------------
+//  Forward declarations
+// ---------------------------------------------------------------------------
+void connectToWiFi();
+void postSensorData();
+void pollCommand();
+void applyCommand(const char* patternStr, const char* textStr);
+PatternMode parseMode(const String& s);
+
+void refreshMatrix();
+void allOff();
+void clearPattern();
+void fillPattern();
+void setLED(int row, int col, bool state);
+
+void runBlink();
+void runChase();
+void runFlicker();
+void runAlternate();
+void runSnake();
+void runDiagonal();
+void runScrollText();
+
+float readTemperatureF();
+
+// ---------------------------------------------------------------------------
+//  Tiny 3x4 font for scrolling text (middle 6 columns of the 10x4 matrix)
+// ---------------------------------------------------------------------------
 struct FontChar {
   char c;
-  byte rows[4];
+  byte rows[4];  // 3 bits used per row
 };
 
 FontChar font[] = {
-  {'0', {B111, B101, B101, B111}},
-  {'1', {B010, B110, B010, B111}},
-  {'2', {B111, B001, B010, B111}},
-  {'3', {B111, B001, B011, B111}},
-  {'4', {B101, B101, B111, B001}},
-  {'5', {B111, B100, B111, B011}},
-  {'6', {B111, B100, B111, B111}},
-  {'7', {B111, B001, B010, B010}},
-  {'8', {B111, B101, B111, B111}},
-  {'9', {B111, B101, B111, B001}},
-
-  {'A', {B111, B101, B111, B101}},
-  {'B', {B110, B101, B110, B111}},
-  {'C', {B111, B100, B100, B111}},
-  {'D', {B110, B101, B101, B110}},
-  {'E', {B111, B100, B110, B111}},
-  {'F', {B111, B100, B110, B100}},
-  {'G', {B111, B100, B101, B111}},
-  {'H', {B101, B101, B111, B101}},
-  {'I', {B111, B010, B010, B111}},
-  {'J', {B001, B001, B101, B111}},
-  {'K', {B101, B110, B100, B101}},
-  {'L', {B100, B100, B100, B111}},
-  {'M', {B101, B111, B101, B101}},
-  {'N', {B101, B111, B111, B101}},
-  {'O', {B111, B101, B101, B111}},
-  {'P', {B111, B101, B111, B100}},
-  {'Q', {B111, B101, B111, B001}},
-  {'R', {B111, B101, B110, B101}},
-  {'S', {B111, B100, B111, B011}},
-  {'T', {B111, B010, B010, B010}},
-  {'U', {B101, B101, B101, B111}},
-  {'V', {B101, B101, B101, B010}},
-  {'W', {B101, B101, B111, B111}},
-  {'X', {B101, B010, B010, B101}},
-  {'Y', {B101, B101, B010, B010}},
-  {'Z', {B111, B001, B010, B111}},
-  {' ', {B000, B000, B000, B000}},
+  {'0', {0b111, 0b101, 0b101, 0b111}},
+  {'1', {0b010, 0b110, 0b010, 0b111}},
+  {'2', {0b111, 0b001, 0b010, 0b111}},
+  {'3', {0b111, 0b001, 0b011, 0b111}},
+  {'4', {0b101, 0b101, 0b111, 0b001}},
+  {'5', {0b111, 0b100, 0b111, 0b011}},
+  {'6', {0b111, 0b100, 0b111, 0b111}},
+  {'7', {0b111, 0b001, 0b010, 0b010}},
+  {'8', {0b111, 0b101, 0b111, 0b111}},
+  {'9', {0b111, 0b101, 0b111, 0b001}},
+  {'A', {0b111, 0b101, 0b111, 0b101}},
+  {'B', {0b110, 0b101, 0b110, 0b111}},
+  {'C', {0b111, 0b100, 0b100, 0b111}},
+  {'D', {0b110, 0b101, 0b101, 0b110}},
+  {'E', {0b111, 0b100, 0b110, 0b111}},
+  {'F', {0b111, 0b100, 0b110, 0b100}},
+  {'G', {0b111, 0b100, 0b101, 0b111}},
+  {'H', {0b101, 0b101, 0b111, 0b101}},
+  {'I', {0b111, 0b010, 0b010, 0b111}},
+  {'J', {0b001, 0b001, 0b101, 0b111}},
+  {'K', {0b101, 0b110, 0b100, 0b101}},
+  {'L', {0b100, 0b100, 0b100, 0b111}},
+  {'M', {0b101, 0b111, 0b101, 0b101}},
+  {'N', {0b101, 0b111, 0b111, 0b101}},
+  {'O', {0b111, 0b101, 0b101, 0b111}},
+  {'P', {0b111, 0b101, 0b111, 0b100}},
+  {'Q', {0b111, 0b101, 0b111, 0b001}},
+  {'R', {0b111, 0b101, 0b110, 0b101}},
+  {'S', {0b111, 0b100, 0b111, 0b011}},
+  {'T', {0b111, 0b010, 0b010, 0b010}},
+  {'U', {0b101, 0b101, 0b101, 0b111}},
+  {'V', {0b101, 0b101, 0b101, 0b010}},
+  {'W', {0b101, 0b101, 0b111, 0b111}},
+  {'X', {0b101, 0b010, 0b010, 0b101}},
+  {'Y', {0b101, 0b101, 0b010, 0b010}},
+  {'Z', {0b111, 0b001, 0b010, 0b111}},
+  {' ', {0b000, 0b000, 0b000, 0b000}},
 };
-
-int fontCount = sizeof(font) / sizeof(font[0]);
-
-void allOff() {
-  for (int c = 0; c < COLS; c++) {
-    digitalWrite(colPins[c], COL_OFF);
-  }
-
-  for (int r = 0; r < ROWS; r++) {
-    digitalWrite(rowPins[r], ROW_OFF);
-  }
-}
-
-void clearBuffer() {
-  for (int r = 0; r < ROWS; r++) {
-    for (int c = 0; c < COLS; c++) {
-      buffer[r][c] = false;
-    }
-  }
-}
+const int fontCount = sizeof(font) / sizeof(font[0]);
 
 byte* getCharPattern(char ch) {
-  if (ch >= 'a' && ch <= 'z') {
-    ch = ch - 'a' + 'A';
-  }
-
+  if (ch >= 'a' && ch <= 'z') ch = ch - 'a' + 'A';
   for (int i = 0; i < fontCount; i++) {
-    if (font[i].c == ch) {
-      return font[i].rows;
-    }
+    if (font[i].c == ch) return font[i].rows;
   }
-
-  return font[fontCount - 1].rows;
+  return font[fontCount - 1].rows;  // space fallback
 }
 
-void drawChar(char ch, int startCol) {
-  byte* pattern = getCharPattern(ch);
+// =============================================================================
+//  TASKS
+// =============================================================================
 
-  for (int r = 0; r < ROWS; r++) {
-    for (int c = 0; c < 3; c++) {
-      int realCol = startCol + c;
+// Matrix task: runs on core 1. Refreshes LEDs continuously and steps the
+// current animation. NEVER blocks on network calls.
+void matrixTask(void* param) {
+  for (;;) {
+    refreshMatrix();
 
-      if (realCol >= 0 && realCol < COLS) {
-        buffer[r][realCol] = bitRead(pattern[r], 2 - c);
+    unsigned long now = millis();
+    if (now - lastAnimMs >= 250) {
+      lastAnimMs = now;
+
+      // Lock briefly while we mutate the frame buffer / scroll state.
+      if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+        switch (currentMode) {
+          case MODE_OFF:         clearPattern(); break;
+          case MODE_BLINK:       runBlink(); break;
+          case MODE_CHASE:       runChase(); break;
+          case MODE_FLICKER:     runFlicker(); break;
+          case MODE_ALTERNATE:   runAlternate(); break;
+          case MODE_SNAKE:       runSnake(); break;
+          case MODE_DIAGONAL:    runDiagonal(); break;
+          case MODE_FILL:        fillPattern(); break;
+          case MODE_SCROLL_TEXT: runScrollText(); break;
+        }
+        xSemaphoreGive(stateMutex);
       }
     }
+
+    // Yield briefly so the watchdog and lower-priority tasks get cycles.
+    // delayMicroseconds is too short; vTaskDelay(1) yields for one tick (~1ms).
+    vTaskDelay(1);
   }
 }
 
-void setTwoChars(char leftChar, char rightChar) {
-  clearBuffer();
-  drawChar(leftChar, 0);
-  drawChar(rightChar, 3);
+// Network task: runs on core 0 alongside the Wi-Fi stack. Allowed to block
+// on HTTP calls because the matrix task is on the other core.
+void networkTask(void* param) {
+  for (;;) {
+    unsigned long now = millis();
+
+    if (now - lastPostMs >= POST_INTERVAL_MS) {
+      lastPostMs = now;
+      postSensorData();
+    }
+
+    if (now - lastPollMs >= POLL_INTERVAL_MS) {
+      lastPollMs = now;
+      pollCommand();
+    }
+
+    // Sleep 50ms between checks. We don't need to be punctual here.
+    vTaskDelay(pdMS_TO_TICKS(50));
+  }
 }
 
-// Important function:
-// Only one LED is ever enabled at a time.
-void refreshOneLedAtATime() {
+// =============================================================================
+//  SETUP / LOOP
+// =============================================================================
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+
+  // Matrix pins
+  for (int r = 0; r < ROWS; r++) {
+    pinMode(rowPins[r], OUTPUT);
+    digitalWrite(rowPins[r], ROW_OFF);
+  }
+  for (int c = 0; c < COLS; c++) {
+    pinMode(colPins[c], OUTPUT);
+    digitalWrite(colPins[c], COL_OFF);
+  }
+  clearPattern();
+
+  // ADC for thermistor
+  analogReadResolution(12);
+  analogSetPinAttenuation(ThermistorPin, ADC_11db);
+
+  // Mutex must exist before either task starts.
+  stateMutex = xSemaphoreCreateMutex();
+  if (stateMutex == nullptr) {
+    Serial.println("FATAL: failed to create mutex");
+    while (1) delay(1000);
+  }
+
+  // Wi-Fi connect runs on the default loopTask before we hand off.
+  connectToWiFi();
+
+  // Pin matrix to core 1, network to core 0.
+  // Stack sizes: 4KB is enough for the matrix loop; network needs 8KB
+  // because HTTPClient + JSON parsing chews through stack.
+  xTaskCreatePinnedToCore(
+    matrixTask, "matrix", 4096, nullptr,
+    2,  // priority: higher than network so refresh stays smooth
+    &matrixTaskHandle, 1);
+
+  xTaskCreatePinnedToCore(
+    networkTask, "network", 8192, nullptr,
+    1, &networkTaskHandle, 0);
+
+  Serial.println("Tasks started: matrix on core 1, network on core 0");
+}
+
+// loop() runs on core 1 alongside matrixTask. We don't need it for anything,
+// so just let it sleep — all real work happens in the two tasks above.
+void loop() {
+  vTaskDelay(pdMS_TO_TICKS(1000));
+}
+
+// =============================================================================
+//  Wi-Fi
+// =============================================================================
+void connectToWiFi() {
+  Serial.print("Connecting to Wi-Fi: ");
+  Serial.println(WIFI_SSID);
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 20000) {
+    // Matrix task isn't running yet, so the display will be dark during
+    // initial connect. That's fine — only takes a few seconds.
+    delay(100);
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nWi-Fi connected");
+    Serial.print("IP: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("\nWi-Fi connect failed (will keep trying in background)");
+  }
+}
+
+// =============================================================================
+//  Sensor
+// =============================================================================
+float readTemperatureF() {
+  int Vo = analogRead(ThermistorPin);
+  if (Vo <= 0 || Vo >= (int)ADC_MAX) return NAN;
+
+  float R2 = R1 * (ADC_MAX / (float)Vo - 1.0);
+  float logR2 = log(R2);
+  float T = 1.0 / (c1 + c2 * logR2 + c3 * logR2 * logR2 * logR2);
+  float Tc = T - 273.15;
+  return (Tc * 9.0) / 5.0 + 32.0;
+}
+
+void postSensorData() {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  float tempF = readTemperatureF();
+  if (isnan(tempF)) {
+    Serial.println("Bad thermistor reading, skipping POST");
+    return;
+  }
+
+  HTTPClient http;
+  http.begin(String(SERVER_BASE) + "/api/update_sensor");
+  http.addHeader("Content-Type", "application/json");
+
+  StaticJsonDocument<128> doc;
+  doc["name"]  = "thermistor_F";
+  doc["value"] = tempF;
+
+  String payload;
+  serializeJson(doc, payload);
+
+  int code = http.POST(payload);
+  Serial.printf("POST sensor (%.2f F) -> %d\n", tempF, code);
+  http.end();
+}
+
+// =============================================================================
+//  Command poll
+//  Server returns: { "pattern": "<name>", "text": "<optional>" }
+// =============================================================================
+void pollCommand() {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  HTTPClient http;
+  http.begin(String(SERVER_BASE) + "/api/get_command");
+  int code = http.GET();
+
+  if (code != 200) {
+    Serial.printf("GET command -> %d\n", code);
+    http.end();
+    return;
+  }
+
+  String body = http.getString();
+  http.end();
+
+  StaticJsonDocument<256> doc;
+  if (deserializeJson(doc, body)) {
+    Serial.println("JSON parse error on command");
+    return;
+  }
+
+  const char* pat  = doc["pattern"]  | "";
+  const char* text = doc["text"]     | "";
+  applyCommand(pat, text);
+}
+
+PatternMode parseMode(const String& s) {
+  if (s == "off")         return MODE_OFF;
+  if (s == "blink")       return MODE_BLINK;
+  if (s == "chase")       return MODE_CHASE;
+  if (s == "flicker")     return MODE_FLICKER;
+  if (s == "alternate")   return MODE_ALTERNATE;
+  if (s == "snake")       return MODE_SNAKE;
+  if (s == "diagonal")    return MODE_DIAGONAL;
+  if (s == "fill")        return MODE_FILL;
+  if (s == "scroll_text") return MODE_SCROLL_TEXT;
+  return currentMode;  // unknown -> keep current
+}
+
+void applyCommand(const char* patternStr, const char* textStr) {
+  // Take the mutex before mutating shared state. Wait up to 100ms; if we
+  // can't get it the matrix task is busy, just skip this update — we'll
+  // get the same command again on the next poll.
+  if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+    Serial.println("applyCommand: mutex timeout, skipping");
+    return;
+  }
+
+  // --- Pattern: only touch state if the mode actually changed ---
+  PatternMode newMode = parseMode(String(patternStr));
+  bool modeChanged = (newMode != currentMode);
+
+  if (modeChanged) {
+    currentMode = newMode;
+    animStep = 0;
+    scrollCol = 0;
+    clearPattern();
+    Serial.printf("Mode -> %s\n", patternStr);
+  }
+  // else: same mode, leave animStep/scrollCol/buffer untouched
+
+  // --- Scroll text: only touch state if the text actually changed ---
+  if (textStr != nullptr) {
+    size_t textLen = strlen(textStr);
+    if (textLen > 0 && textLen < sizeof(scrollMessage)
+        && strcmp(textStr, scrollMessage) != 0) {
+      strncpy(scrollMessage, textStr, sizeof(scrollMessage) - 1);
+      scrollMessage[sizeof(scrollMessage) - 1] = '\0';
+      scrollCol = 0;
+      Serial.printf("Text -> %s\n", scrollMessage);
+    }
+  }
+
+  xSemaphoreGive(stateMutex);
+}
+
+// =============================================================================
+//  Matrix primitives
+// =============================================================================
+void allOff() {
+  for (int c = 0; c < COLS; c++) digitalWrite(colPins[c], COL_OFF);
+  for (int r = 0; r < ROWS; r++) digitalWrite(rowPins[r], ROW_OFF);
+}
+
+void clearPattern() {
+  for (int r = 0; r < ROWS; r++)
+    for (int c = 0; c < COLS; c++)
+      pattern_buf[r][c] = false;
+}
+
+void fillPattern() {
+  for (int r = 0; r < ROWS; r++)
+    for (int c = 0; c < COLS; c++)
+      pattern_buf[r][c] = true;
+}
+
+void setLED(int row, int col, bool state) {
+  if (row >= 0 && row < ROWS && col >= 0 && col < COLS) {
+    pattern_buf[row][col] = state;
+  }
+}
+
+// One-LED-at-a-time scan. Robust: works even if power supply is weak.
+void refreshMatrix() {
   for (int c = 0; c < COLS; c++) {
     for (int r = 0; r < ROWS; r++) {
-      allOff();
-
-      if (buffer[r][c]) {
+      if (pattern_buf[r][c]) {
+        allOff();
         digitalWrite(rowPins[r], ROW_ON);
         digitalWrite(colPins[c], COL_ON);
         delayMicroseconds(PIXEL_TIME_US);
-      } else {
-        delayMicroseconds(2);
       }
-
-      allOff();
     }
   }
-}
-
-void setup() {
-  for (int c = 0; c < COLS; c++) {
-    pinMode(colPins[c], OUTPUT);
-  }
-
-  for (int r = 0; r < ROWS; r++) {
-    pinMode(rowPins[r], OUTPUT);
-  }
-
   allOff();
-
-  setTwoChars('A', '1');
 }
 
-void drawScrollingText(const char* message, int scrollCol) {
-  clearBuffer();
+// =============================================================================
+//  Pattern implementations
+// =============================================================================
+void runBlink() {
+  if (animStep % 2 == 0) fillPattern();
+  else clearPattern();
+  animStep++;
+}
 
-  int len = strlen(message);
+void runChase() {
+  clearPattern();
+  for (int r = 0; r < ROWS; r++) setLED(r, animStep % COLS, true);
+  animStep++;
+}
 
-  // 3 columns for character + 1 blank column spacing
-  int charWidthWithSpace = 4;
+void runFlicker() {
+  clearPattern();
+  // Light ~25% of pixels at random
+  int n = (ROWS * COLS) / 4;
+  for (int i = 0; i < n; i++) {
+    setLED(random(ROWS), random(COLS), true);
+  }
+  animStep++;
+}
+
+void runAlternate() {
+  for (int r = 0; r < ROWS; r++)
+    for (int c = 0; c < COLS; c++)
+      pattern_buf[r][c] = ((r + c + animStep) % 2 == 0);
+  animStep++;
+}
+
+void runSnake() {
+  if (animStep > ROWS * COLS) {
+    animStep = 0;
+    clearPattern();
+    return;
+  }
+  clearPattern();
+  for (int i = 0; i < animStep; i++) {
+    int row = i / COLS;
+    int col = (row % 2 == 0) ? (i % COLS) : (COLS - 1 - (i % COLS));
+    setLED(row, col, true);
+  }
+  animStep++;
+}
+
+void runDiagonal() {
+  if (animStep > ROWS + COLS) {
+    animStep = 0;
+  }
+  clearPattern();
+  for (int r = 0; r < ROWS; r++) {
+    int c = animStep - r;
+    if (c >= 0 && c < COLS) setLED(r, c, true);
+  }
+  animStep++;
+}
+
+// Scrolling text -- displayed in the middle 6 columns (cols 2..7) so it looks
+// like the original 6x4 matrix, while leaving cols 0..1 and 8..9 dark.
+void runScrollText() {
+  clearPattern();
+
+  int len = strlen(scrollMessage);
+  if (len == 0) return;
+
+  const int charWidthWithSpace = 4;   // 3 px char + 1 px gap
   int totalTextCols = len * charWidthWithSpace;
 
-  for (int displayCol = 0; displayCol < COLS; displayCol++) {
-    int sourceCol = scrollCol + displayCol;
+  const int windowStart = 2;
+  const int windowWidth = 6;
 
-    // Wrap around message
-    sourceCol = sourceCol % totalTextCols;
-
+  for (int displayCol = 0; displayCol < windowWidth; displayCol++) {
+    int sourceCol = (scrollCol + displayCol) % totalTextCols;
     int charIndex = sourceCol / charWidthWithSpace;
-    int charCol = sourceCol % charWidthWithSpace;
+    int charCol   = sourceCol % charWidthWithSpace;
 
-    // charCol 0,1,2 = actual character pixels
-    // charCol 3 = blank spacing column
-    if (charCol == 3) {
-      for (int r = 0; r < ROWS; r++) {
-        buffer[r][displayCol] = false;
-      }
-    } else {
-      byte* pattern = getCharPattern(message[charIndex]);
+    if (charCol == 3) continue;  // gap column
 
-      for (int r = 0; r < ROWS; r++) {
-        buffer[r][displayCol] = bitRead(pattern[r], 2 - charCol);
-      }
-    }
-  }
-}
-
-void loop() {
-  static unsigned long lastScroll = 0;
-  static int scrollCol = 0;
-
-  const char message[] = "HELLO 123 ABC XYZ   ";
-  int len = strlen(message);
-  int totalTextCols = len * 4; // 3 columns for character + 1 blank column spacing
-
-  if (millis() - lastScroll >= 650) {
-    lastScroll = millis();
-
-    drawScrollingText(message, scrollCol);
-
-    scrollCol++;
-
-    if (scrollCol >= totalTextCols) {
-      scrollCol = 0;
+    byte* p = getCharPattern(scrollMessage[charIndex]);
+    for (int r = 0; r < ROWS; r++) {
+      bool bit = bitRead(p[r], 2 - charCol);
+      pattern_buf[r][windowStart + displayCol] = bit;
     }
   }
 
-  refreshOneLedAtATime();
+  scrollCol++;
+  if (scrollCol >= totalTextCols) scrollCol = 0;
 }
