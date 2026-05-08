@@ -1,38 +1,15 @@
-// =============================================================================
-//  ESP32 Unified Firmware
-//  - Wi-Fi connect
-//  - POST thermistor reading every 3s to /api/update_sensor
-//  - Poll /api/get_command every 2s for pattern + scroll text
-//  - Drive a 10x4 LED matrix with multiple patterns
-//  - 6x4 scrolling text uses the middle 6 columns of the same matrix
-//
-//  Wiring assumption (matches the snippets you provided):
-//    Columns = anodes (HIGH = active)
-//    Rows    = cathodes (LOW = active)
-//    LED ON  = column HIGH AND row LOW
-//
-//  IMPORTANT PIN NOTE:
-//    GPIO 34/35/36/37/39 are INPUT-ONLY on most classic ESP32 boards and
-//    cannot drive an LED column. The pin map below mirrors your original
-//    snippet so you can compile, but you should swap any input-only pins
-//    for real output-capable GPIOs (e.g. 4, 18, 19, 21, 22, 23, 25, 26, 27).
-// =============================================================================
-
 #include <Arduino.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <math.h>
 
-// ---------------------------------------------------------------------------
-//  Wi-Fi / server config
-// ---------------------------------------------------------------------------
 const char* WIFI_SSID   = "Coldspot";
 const char* WIFI_PASS   = "not4youbuddy";
 const char* SERVER_BASE = "http://10.247.139.7:5000";
 
-const unsigned long POST_INTERVAL_MS = 3000;  // sensor POST cadence
-const unsigned long POLL_INTERVAL_MS = 2000;  // command poll cadence
+const unsigned long POST_INTERVAL_MS = 3000;
+const unsigned long POLL_INTERVAL_MS = 2000;
 
 unsigned long lastPostMs = 0;
 unsigned long lastPollMs = 0;
@@ -53,11 +30,8 @@ const float c3 = 2.019202697e-07;
 #define ROWS 4
 #define COLS 10
 
-// Rows: top -> bottom
-int rowPins[ROWS] = {5, 6, 9, 10};
 
-// Columns: left -> right
-// (See pin warning at top of file.)
+int rowPins[ROWS] = {5, 6, 9, 10};
 int colPins[COLS] = {39, 38, 17, 16, 15, 14, 8, 36, 35, 37};
 
 #define ROW_ON  LOW
@@ -65,25 +39,36 @@ int colPins[COLS] = {39, 38, 17, 16, 15, 14, 8, 36, 35, 37};
 #define COL_ON  HIGH
 #define COL_OFF LOW
 
-// Per-pixel scan time (microseconds). Higher = brighter, lower = less flicker.
 #define PIXEL_TIME_US 40
 
-// Frame buffer
-bool pattern_buf[ROWS][COLS];
+constexpr size_t BUF_BITS  = ROWS * COLS;        // 40
+constexpr size_t BUF_BYTES = (BUF_BITS + 7) / 8; // 5
+uint8_t pattern_buf[BUF_BYTES];
 
-// ---------------------------------------------------------------------------
-//  Pattern state
-// ---------------------------------------------------------------------------
+inline bool getLED(int row, int col) {
+  int bit = row * COLS + col;
+  return (pattern_buf[bit >> 3] >> (bit & 7)) & 0x01;
+}
+
+inline void setLEDfast(int row, int col, bool state) {
+  int bit = row * COLS + col;
+  uint8_t mask = 1u << (bit & 7);
+  if (state) pattern_buf[bit >> 3] |=  mask;
+  else       pattern_buf[bit >> 3] &= ~mask;
+}
+
 enum PatternMode {
   MODE_OFF,
-  MODE_BLINK,        // blink whole display
-  MODE_CHASE,        // single column sweeping L->R
-  MODE_FLICKER,      // random pixels
-  MODE_ALTERNATE,    // checkerboard toggle
-  MODE_SNAKE,        // snake fill
-  MODE_DIAGONAL,     // diagonal wave
-  MODE_FILL,         // all on
-  MODE_SCROLL_TEXT   // 6x4 scrolling text in middle 6 columns
+  MODE_BLINK,
+  MODE_CHASE,
+  MODE_FLICKER,
+  MODE_ALTERNATE,
+  MODE_SNAKE,
+  MODE_DIAGONAL,
+  MODE_FILL,
+  MODE_SCROLL_TEXT,
+  MODE_ALERT_BARS,
+  MODE_RAINBOW
 };
 
 PatternMode currentMode = MODE_BLINK;
@@ -104,10 +89,8 @@ SemaphoreHandle_t stateMutex = nullptr;
 TaskHandle_t      matrixTaskHandle = nullptr;
 TaskHandle_t      networkTaskHandle = nullptr;
 
-// ---------------------------------------------------------------------------
-//  Forward declarations
-// ---------------------------------------------------------------------------
 void connectToWiFi();
+bool ensureWiFi();
 void postSensorData();
 void pollCommand();
 void applyCommand(const char* patternStr, const char* textStr);
@@ -126,15 +109,15 @@ void runAlternate();
 void runSnake();
 void runDiagonal();
 void runScrollText();
+void runAlertBars();
+void runRainbow();
 
 float readTemperatureF();
 
-// ---------------------------------------------------------------------------
-//  Tiny 3x4 font for scrolling text (middle 6 columns of the 10x4 matrix)
-// ---------------------------------------------------------------------------
+
 struct FontChar {
   char c;
-  byte rows[4];  // 3 bits used per row
+  byte rows[4];
 };
 
 FontChar font[] = {
@@ -186,12 +169,6 @@ byte* getCharPattern(char ch) {
   return font[fontCount - 1].rows;  // space fallback
 }
 
-// =============================================================================
-//  TASKS
-// =============================================================================
-
-// Matrix task: runs on core 1. Refreshes LEDs continuously and steps the
-// current animation. NEVER blocks on network calls.
 void matrixTask(void* param) {
   for (;;) {
     refreshMatrix();
@@ -212,19 +189,17 @@ void matrixTask(void* param) {
           case MODE_DIAGONAL:    runDiagonal(); break;
           case MODE_FILL:        fillPattern(); break;
           case MODE_SCROLL_TEXT: runScrollText(); break;
+          case MODE_ALERT_BARS:   runAlertBars(); break;
+          case MODE_RAINBOW:      runRainbow(); break;
         }
         xSemaphoreGive(stateMutex);
       }
     }
 
-    // Yield briefly so the watchdog and lower-priority tasks get cycles.
-    // delayMicroseconds is too short; vTaskDelay(1) yields for one tick (~1ms).
     vTaskDelay(1);
   }
 }
 
-// Network task: runs on core 0 alongside the Wi-Fi stack. Allowed to block
-// on HTTP calls because the matrix task is on the other core.
 void networkTask(void* param) {
   for (;;) {
     unsigned long now = millis();
@@ -239,14 +214,11 @@ void networkTask(void* param) {
       pollCommand();
     }
 
-    // Sleep 50ms between checks. We don't need to be punctual here.
     vTaskDelay(pdMS_TO_TICKS(50));
   }
 }
 
-// =============================================================================
-//  SETUP / LOOP
-// =============================================================================
+
 void setup() {
   Serial.begin(115200);
   delay(500);
@@ -266,19 +238,14 @@ void setup() {
   analogReadResolution(12);
   analogSetPinAttenuation(ThermistorPin, ADC_11db);
 
-  // Mutex must exist before either task starts.
   stateMutex = xSemaphoreCreateMutex();
   if (stateMutex == nullptr) {
     Serial.println("FATAL: failed to create mutex");
     while (1) delay(1000);
   }
-
-  // Wi-Fi connect runs on the default loopTask before we hand off.
   connectToWiFi();
 
   // Pin matrix to core 1, network to core 0.
-  // Stack sizes: 4KB is enough for the matrix loop; network needs 8KB
-  // because HTTPClient + JSON parsing chews through stack.
   xTaskCreatePinnedToCore(
     matrixTask, "matrix", 4096, nullptr,
     2,  // priority: higher than network so refresh stays smooth
@@ -291,26 +258,21 @@ void setup() {
   Serial.println("Tasks started: matrix on core 1, network on core 0");
 }
 
-// loop() runs on core 1 alongside matrixTask. We don't need it for anything,
-// so just let it sleep — all real work happens in the two tasks above.
 void loop() {
   vTaskDelay(pdMS_TO_TICKS(1000));
 }
 
-// =============================================================================
-//  Wi-Fi
-// =============================================================================
 void connectToWiFi() {
   Serial.print("Connecting to Wi-Fi: ");
   Serial.println(WIFI_SSID);
 
   WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true); 
+  WiFi.persistent(true);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
 
   unsigned long start = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - start < 20000) {
-    // Matrix task isn't running yet, so the display will be dark during
-    // initial connect. That's fine — only takes a few seconds.
     delay(100);
   }
 
@@ -323,9 +285,23 @@ void connectToWiFi() {
   }
 }
 
-// =============================================================================
-//  Sensor
-// =============================================================================
+bool ensureWiFi() {
+  if (WiFi.status() == WL_CONNECTED) return true;
+
+  Serial.println("[WiFi] Disconnected, attempting reconnect...");
+  WiFi.disconnect();
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 8000) {
+    vTaskDelay(pdMS_TO_TICKS(100));  // yield, don't busy-wait
+  }
+
+  bool ok = (WiFi.status() == WL_CONNECTED);
+  Serial.printf("[WiFi] Reconnect %s\n", ok ? "OK" : "failed");
+  return ok;
+}
+
 float readTemperatureF() {
   int Vo = analogRead(ThermistorPin);
   if (Vo <= 0 || Vo >= (int)ADC_MAX) return NAN;
@@ -338,7 +314,7 @@ float readTemperatureF() {
 }
 
 void postSensorData() {
-  if (WiFi.status() != WL_CONNECTED) return;
+  if (!ensureWiFi()) return;
 
   float tempF = readTemperatureF();
   if (isnan(tempF)) {
@@ -347,6 +323,8 @@ void postSensorData() {
   }
 
   HTTPClient http;
+  http.setReuse(true); 
+  http.setTimeout(3000); 
   http.begin(String(SERVER_BASE) + "/api/update_sensor");
   http.addHeader("Content-Type", "application/json");
 
@@ -362,14 +340,12 @@ void postSensorData() {
   http.end();
 }
 
-// =============================================================================
-//  Command poll
-//  Server returns: { "pattern": "<name>", "text": "<optional>" }
-// =============================================================================
 void pollCommand() {
-  if (WiFi.status() != WL_CONNECTED) return;
+  if (!ensureWiFi()) return;
 
   HTTPClient http;
+  http.setReuse(true);
+  http.setTimeout(3000);
   http.begin(String(SERVER_BASE) + "/api/get_command");
   int code = http.GET();
 
@@ -403,13 +379,12 @@ PatternMode parseMode(const String& s) {
   if (s == "diagonal")    return MODE_DIAGONAL;
   if (s == "fill")        return MODE_FILL;
   if (s == "scroll_text") return MODE_SCROLL_TEXT;
-  return currentMode;  // unknown -> keep current
+  if (s == "alert_bars")  return MODE_ALERT_BARS;
+  if (s == "rainbow")     return MODE_RAINBOW;
+  return currentMode;
 }
 
 void applyCommand(const char* patternStr, const char* textStr) {
-  // Take the mutex before mutating shared state. Wait up to 100ms; if we
-  // can't get it the matrix task is busy, just skip this update — we'll
-  // get the same command again on the next poll.
   if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
     Serial.println("applyCommand: mutex timeout, skipping");
     return;
@@ -452,20 +427,19 @@ void allOff() {
 }
 
 void clearPattern() {
-  for (int r = 0; r < ROWS; r++)
-    for (int c = 0; c < COLS; c++)
-      pattern_buf[r][c] = false;
+  // Single memset clears all 40 bits in 5 bytes — one cache line.
+  memset(pattern_buf, 0x00, sizeof(pattern_buf));
 }
 
 void fillPattern() {
-  for (int r = 0; r < ROWS; r++)
-    for (int c = 0; c < COLS; c++)
-      pattern_buf[r][c] = true;
+  // 0xFF sets all 8 bits per byte. The 40-bit matrix fits exactly into
+  // 5 bytes so there are no padding bits to worry about.
+  memset(pattern_buf, 0xFF, sizeof(pattern_buf));
 }
 
 void setLED(int row, int col, bool state) {
   if (row >= 0 && row < ROWS && col >= 0 && col < COLS) {
-    pattern_buf[row][col] = state;
+    setLEDfast(row, col, state);
   }
 }
 
@@ -473,7 +447,7 @@ void setLED(int row, int col, bool state) {
 void refreshMatrix() {
   for (int c = 0; c < COLS; c++) {
     for (int r = 0; r < ROWS; r++) {
-      if (pattern_buf[r][c]) {
+      if (getLED(r, c)) {
         allOff();
         digitalWrite(rowPins[r], ROW_ON);
         digitalWrite(colPins[c], COL_ON);
@@ -512,7 +486,7 @@ void runFlicker() {
 void runAlternate() {
   for (int r = 0; r < ROWS; r++)
     for (int c = 0; c < COLS; c++)
-      pattern_buf[r][c] = ((r + c + animStep) % 2 == 0);
+      setLEDfast(r, c, ((r + c + animStep) % 2 == 0));
   animStep++;
 }
 
@@ -567,10 +541,48 @@ void runScrollText() {
     byte* p = getCharPattern(scrollMessage[charIndex]);
     for (int r = 0; r < ROWS; r++) {
       bool bit = bitRead(p[r], 2 - charCol);
-      pattern_buf[r][windowStart + displayCol] = bit;
+      setLEDfast(r, windowStart + displayCol, bit);
     }
   }
 
   scrollCol++;
   if (scrollCol >= totalTextCols) scrollCol = 0;
+}
+
+void runAlertBars() {
+  clearPattern();
+
+  const int windowStart = 2;
+  const int windowWidth = 6;
+  // Heights chosen to feel like a rising meter that pegs at max.
+  const int heights[6] = {1, 2, 3, 4, 4, 4};
+
+  for (int i = 0; i < windowWidth; i++) {
+    int col = windowStart + i;
+    int h   = heights[i];
+
+    // Last column is the "peak" -- blink it so the alert reads as urgent.
+    bool drawThisCol = true;
+    if (i == windowWidth - 1) {
+      drawThisCol = (animStep % 2 == 0);
+    }
+    if (!drawThisCol) continue;
+
+    // Light h pixels from the bottom: rows (ROWS-1) down to (ROWS-h).
+    for (int k = 0; k < h; k++) {
+      int row = (ROWS - 1) - k;
+      setLEDfast(row, col, true);
+    }
+  }
+  animStep++;
+}
+
+void runRainbow() {
+  clearPattern();
+  const int seq[6] = {0, 1, 2, 7, 8, 9};
+  int col = seq[animStep % 6];
+  for (int r = 0; r < ROWS; r++) {
+    setLEDfast(r, col, true);
+  }
+  animStep++;
 }

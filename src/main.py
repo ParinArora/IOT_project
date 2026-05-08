@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify, render_template_string
 from datetime import datetime
+from collections import deque
 
 app = Flask(__name__)
 
@@ -14,7 +15,14 @@ ALLOWED_PATTERNS = {
     "diagonal",
     "fill",
     "scroll_text",
+    "alert_bars",   # NEW
+    "rainbow",      # NEW
 }
+
+# Rolling sensor history. Stored server-side so the chart survives page
+# refresh and so multiple browsers see the same data.
+MAX_HISTORY = 60
+sensor_history: "deque[dict]" = deque(maxlen=MAX_HISTORY)
 
 state = {
     "sensor_value": None,
@@ -23,6 +31,11 @@ state = {
     "scroll_text": "HELLO ESP32 ",
     "last_esp_seen": None,
     "esp_ip": None,
+    # Alert state. user_pattern is what the user last manually chose --
+    # we restore it when the temperature drops back below threshold.
+    "alert_threshold": 85.0,
+    "alert_active": False,
+    "user_pattern": "blink",
 }
 
 HTML_PAGE = """
@@ -34,6 +47,7 @@ HTML_PAGE = """
     <title>ESP32 IoT Control Panel</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <style>
         *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -204,15 +218,34 @@ HTML_PAGE = """
             letter-spacing: 0.05em;
         }
 
-        .history-track {
-            display: flex; gap: 3px; align-items: flex-end; height: 48px;
+        .chart-wrap {
+            position: relative;
+            height: 220px;
+            width: 100%;
         }
-        .history-bar {
-            flex: 1; background: var(--surface-2);
-            border-radius: 2px; transition: height 0.4s ease, background 0.3s ease;
-            min-height: 4px;
+
+        .threshold-wrap {
+            display: flex; align-items: center; gap: 6px;
+            font-family: var(--mono); font-size: 0.72rem;
+            color: var(--text-muted);
         }
-        .history-bar.active { background: var(--accent); opacity: 0.7; }
+        .threshold-wrap input {
+            width: 56px;
+            font-family: var(--mono); font-size: 0.78rem;
+            padding: 3px 6px;
+            background: var(--surface-2);
+            border: 1px solid var(--border-strong);
+            border-radius: 4px;
+            color: var(--text);
+            outline: none;
+            text-align: center;
+        }
+        .threshold-wrap input:focus { border-color: var(--accent-border); }
+
+        .alert-flash {
+            border-color: var(--amber) !important;
+            box-shadow: 0 0 0 1px var(--amber-dim);
+        }
 
         .history-meta {
             display: flex; justify-content: space-between;
@@ -311,6 +344,8 @@ HTML_PAGE = """
             <button class="btn" onclick="setPattern('snake')" data-pattern="snake">snake</button>
             <button class="btn" onclick="setPattern('diagonal')" data-pattern="diagonal">diagonal</button>
             <button class="btn" onclick="setPattern('fill')" data-pattern="fill">fill</button>
+            <button class="btn" onclick="setPattern('alert_bars')" data-pattern="alert_bars">alert</button>
+            <button class="btn" onclick="setPattern('rainbow')" data-pattern="rainbow">rainbow</button>
             <button class="btn btn-off" onclick="setPattern('off')" data-pattern="off">off</button>
         </div>
     </div>
@@ -329,9 +364,16 @@ HTML_PAGE = """
 
     <div class="section">
         <div class="section-header">
-            <div class="card-label" style="margin:0">// thermistor history (last 30 readings)</div>
+            <div class="card-label" style="margin:0">// thermistor live graph (last 60 readings)</div>
+            <div class="threshold-wrap">
+                <label for="thresholdInput">alert &gt;</label>
+                <input type="number" id="thresholdInput" value="85" step="1">
+                <span>°F</span>
+            </div>
         </div>
-        <div class="history-track" id="historyTrack"></div>
+        <div class="chart-wrap">
+            <canvas id="sensorChart"></canvas>
+        </div>
         <div class="history-meta">
             <span id="historyMin">min: --</span>
             <span id="historyMax">max: --</span>
@@ -352,18 +394,61 @@ HTML_PAGE = """
 <div class="toast" id="toast"></div>
 
 <script>
-    const MAX_HISTORY = 30;
-    let sensorHistory = [];
+    let sensorChart = null;
 
-    function initHistory() {
-        const track = document.getElementById('historyTrack');
-        track.innerHTML = '';
-        for (let i = 0; i < MAX_HISTORY; i++) {
-            const bar = document.createElement('div');
-            bar.className = 'history-bar';
-            bar.style.height = '4px';
-            track.appendChild(bar);
-        }
+    function initChart() {
+        const ctx = document.getElementById('sensorChart').getContext('2d');
+        sensorChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [{
+                    label: 'sensor',
+                    data: [],
+                    borderColor: '#4ade80',
+                    backgroundColor: 'rgba(74,222,128,0.08)',
+                    borderWidth: 2,
+                    tension: 0.35,
+                    pointRadius: 1.5,
+                    pointHoverRadius: 4,
+                    fill: true,
+                }]
+            },
+            options: {
+                animation: false,
+                responsive: true,
+                maintainAspectRatio: false,
+                interaction: { intersect: false, mode: 'index' },
+                scales: {
+                    x: {
+                        ticks: {
+                            color: '#6b7280',
+                            font: { family: 'IBM Plex Mono', size: 10 },
+                            maxTicksLimit: 6,
+                            maxRotation: 0,
+                        },
+                        grid: { color: 'rgba(255,255,255,0.04)' },
+                    },
+                    y: {
+                        ticks: {
+                            color: '#6b7280',
+                            font: { family: 'IBM Plex Mono', size: 10 },
+                        },
+                        grid: { color: 'rgba(255,255,255,0.04)' },
+                    },
+                },
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                        backgroundColor: '#1c2030',
+                        titleFont: { family: 'IBM Plex Mono', size: 11 },
+                        bodyFont:  { family: 'IBM Plex Mono', size: 11 },
+                        borderColor: 'rgba(255,255,255,0.14)',
+                        borderWidth: 1,
+                    },
+                }
+            }
+        });
     }
 
     function fmt(v) {
@@ -372,37 +457,37 @@ HTML_PAGE = """
         return Number.isInteger(n) ? n.toString() : n.toFixed(1);
     }
 
-    function updateHistory(value) {
-        if (value === null || value === undefined) return;
-        const n = Number(value);
-        if (isNaN(n)) return;
+    function updateChart(history) {
+        if (!sensorChart || !Array.isArray(history) || history.length === 0) return;
 
-        sensorHistory.push(n);
-        if (sensorHistory.length > MAX_HISTORY) sensorHistory.shift();
-
-        const bars = document.querySelectorAll('.history-bar');
-        const minV = Math.min(...sensorHistory);
-        const maxV = Math.max(...sensorHistory);
-        const range = Math.max(maxV - minV, 1);
-        const latest = sensorHistory.length - 1;
-
-        bars.forEach((bar, i) => {
-            const dataIdx = i - (MAX_HISTORY - sensorHistory.length);
-            if (dataIdx < 0) {
-                bar.style.height = '4px';
-                bar.classList.remove('active');
-            } else {
-                const norm = (sensorHistory[dataIdx] - minV) / range;
-                const px = norm * 40 + 6;
-                bar.style.height = px + 'px';
-                bar.classList.toggle('active', dataIdx === latest);
-            }
+        const labels = history.map(h => {
+            const d = new Date(h.t + 'Z');
+            return d.toLocaleTimeString([], { hour12: false });
         });
+        const values = history.map(h => h.v);
 
-        const avg = sensorHistory.reduce((a,b) => a+b, 0) / sensorHistory.length;
+        sensorChart.data.labels = labels;
+        sensorChart.data.datasets[0].data = values;
+        sensorChart.update('none');
+
+        const minV = Math.min(...values);
+        const maxV = Math.max(...values);
+        const avg  = values.reduce((a, b) => a + b, 0) / values.length;
         document.getElementById('historyMin').textContent = 'min: ' + fmt(minV);
         document.getElementById('historyMax').textContent = 'max: ' + fmt(maxV);
         document.getElementById('historyAvg').textContent = 'avg: ' + fmt(avg);
+    }
+
+    function checkThreshold(value) {
+        const card = document.querySelector('.card');
+        if (!card) return;
+        const thrEl = document.getElementById('thresholdInput');
+        const thr = parseFloat(thrEl.value);
+        if (!isNaN(thr) && value !== null && value !== undefined && Number(value) > thr) {
+            card.classList.add('alert-flash');
+        } else {
+            card.classList.remove('alert-flash');
+        }
     }
 
     function showToast(msg) {
@@ -426,7 +511,14 @@ HTML_PAGE = """
 
             document.getElementById('sensorValue').textContent = fmt(data.sensor_value);
             document.getElementById('sensorName').textContent = data.sensor_name ?? 'sensor';
-            updateHistory(data.sensor_value);
+
+            const thresholdInput = document.getElementById('thresholdInput');
+            if (data.alert_threshold !== undefined && document.activeElement !== thresholdInput) {
+                thresholdInput.value = data.alert_threshold;
+            }
+
+            updateChart(data.history);
+            checkThreshold(data.sensor_value);
 
             const pat = data.pattern ?? 'blink';
             document.getElementById('patternDisplay').textContent = pat;
@@ -470,7 +562,11 @@ HTML_PAGE = """
             });
             const data = await res.json();
             if (data.ok) {
-                showToast('pattern → ' + pattern);
+                if (data.queued) {
+                    showToast('queued → ' + data.queued);
+                } else {
+                    showToast('pattern → ' + pattern);
+                }
                 fetchState();
             } else {
                 showToast('error: ' + (data.error || 'unknown'));
@@ -512,7 +608,23 @@ HTML_PAGE = """
         if (e.key === 'Enter') sendScrollText();
     });
 
-    initHistory();
+    document.getElementById('thresholdInput').addEventListener('change', async (e) => {
+        const thr = parseFloat(e.target.value);
+        if (isNaN(thr)) return;
+        try {
+            await fetch('/api/set_threshold', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ threshold: thr })
+            });
+            showToast('threshold → ' + thr + '°F');
+            fetchState();
+        } catch (err) {
+            console.error('set_threshold error:', err);
+        }
+    });
+
+    initChart();
     fetchState();
     setInterval(fetchState, 2000);
 </script>
@@ -535,13 +647,16 @@ def get_state():
         is_online = delta.total_seconds() < 10
 
     return jsonify({
-        "sensor_value": state["sensor_value"],
-        "sensor_name":  state["sensor_name"],
-        "pattern":      state["pattern"],
-        "scroll_text":  state["scroll_text"],
-        "last_esp_seen": last_seen.isoformat() if last_seen else None,
-        "esp_ip":       state["esp_ip"],
-        "is_online":    is_online,
+        "sensor_value":     state["sensor_value"],
+        "sensor_name":      state["sensor_name"],
+        "pattern":          state["pattern"],
+        "scroll_text":      state["scroll_text"],
+        "last_esp_seen":    last_seen.isoformat() if last_seen else None,
+        "esp_ip":           state["esp_ip"],
+        "is_online":        is_online,
+        "history":          list(sensor_history),
+        "alert_threshold":  state["alert_threshold"],
+        "alert_active":     state["alert_active"],
     })
 
 
@@ -555,6 +670,22 @@ def set_pattern():
             "ok": False,
             "error": f"Invalid pattern. Allowed: {sorted(ALLOWED_PATTERNS)}",
         }), 400
+
+    # Remember user's choice so we can restore after an alert clears.
+    # Don't record alert_bars itself as the "user pattern" -- otherwise
+    # an alert that auto-sets it would stick around forever.
+    if pattern != "alert_bars":
+        state["user_pattern"] = pattern
+
+    # If an alert is currently active, the user's choice is queued but
+    # alert_bars stays on the wire until temp drops.
+    if state["alert_active"] and pattern != "alert_bars":
+        return jsonify({
+            "ok": True,
+            "pattern": "alert_bars",
+            "queued": pattern,
+            "note": "alert active; your choice will apply when temp drops below threshold",
+        })
 
     state["pattern"] = pattern
     return jsonify({"ok": True, "pattern": pattern})
@@ -573,21 +704,67 @@ def set_scroll_text():
     # Trim to ASCII printable; firmware font only handles A-Z, 0-9, space
     cleaned = text.upper()
     if not cleaned.endswith(" "):
-        cleaned += " "  # ensure a gap when wrapping
+        cleaned += " "
 
     state["scroll_text"] = cleaned
-    state["pattern"] = "scroll_text"  # auto-switch to scrolling
+    state["pattern"] = "scroll_text"
     return jsonify({"ok": True, "text": cleaned, "pattern": "scroll_text"})
+
+
+@app.route("/api/set_threshold", methods=["POST"])
+def set_threshold():
+    data = request.get_json(silent=True) or {}
+    try:
+        thr = float(data.get("threshold"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "threshold must be a number"}), 400
+
+    state["alert_threshold"] = thr
+
+    # Re-evaluate immediately against the latest reading so toggling the
+    # threshold doesn't have to wait for the next sensor POST.
+    _reevaluate_alert(state["sensor_value"])
+
+    return jsonify({
+        "ok": True,
+        "threshold": thr,
+        "alert_active": state["alert_active"],
+    })
+
+
+def _reevaluate_alert(value):
+    """Compare value to threshold and toggle alert_bars / restore user pattern."""
+    if not isinstance(value, (int, float)):
+        return
+
+    over = value > state["alert_threshold"]
+
+    if over and not state["alert_active"]:
+        state["alert_active"] = True
+        state["pattern"] = "alert_bars"
+    elif not over and state["alert_active"]:
+        state["alert_active"] = False
+
+        # Restore whatever the user last chose (defaults to blink).
+        state["pattern"] = state.get("user_pattern", "blink")
 
 
 @app.route("/api/update_sensor", methods=["POST"])
 def update_sensor():
     data = request.get_json(silent=True) or {}
+    value = data.get("value")
 
-    state["sensor_value"]  = data.get("value")
+    state["sensor_value"]  = value
     state["sensor_name"]   = data.get("name", "sensor")
     state["last_esp_seen"] = datetime.utcnow()
     state["esp_ip"]        = request.remote_addr
+
+    if isinstance(value, (int, float)):
+        sensor_history.append({
+            "t": state["last_esp_seen"].isoformat(),
+            "v": float(value),
+        })
+        _reevaluate_alert(value)
 
     return jsonify({"ok": True})
 
